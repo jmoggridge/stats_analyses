@@ -1,0 +1,197 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup}
+knitr::opts_chunk$set(message = FALSE)
+```
+
+From Julia Silge's video: https://www.youtube.com/watch?v=EDQnJF9LKHQ
+About this TidyTuesday dataset
+
+Decision tree model for predicting capacity of wind turbines based on their characteristics, location, and year of commissioning. Visualization with some other packages:`parttree`, `vip`
+
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(skimr)
+theme_set(theme_minimal())
+```
+
+
+```{r}
+turbines <- read_csv('https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-10-27/wind-turbine.csv')
+skimr::skim(turbines)
+
+```
+### Tidy data
+
+```{r}
+turbine_df <- turbines %>% 
+  transmute(
+    turbine_capacity = turbine_rated_capacity_k_w,
+    rotor_diameter_m,
+    hub_height_m,
+    longitude, 
+    latitude,
+    # fix some year labels 
+    commissioning_date = parse_number(commissioning_date),
+    # lump some rare factors together, keep top 10
+    model = fct_lump_n(model, n = 10),
+    province_territory = fct_lump_n(province_territory, 8)
+    ) %>% 
+  filter(!is.na(turbine_capacity)) %>% 
+  mutate_if(is.character, factor)
+
+skimr::skim(turbine_df)
+```
+
+## Turbine capacity against predictors
+```{r}
+
+turbine_df %>% 
+  pivot_longer(rotor_diameter_m:commissioning_date) %>% 
+  ggplot(aes(turbine_capacity, value)) +
+  geom_hex(alpha = 0.8, bins =15) +
+  geom_smooth(method = 'lm') +
+  facet_wrap(~name, scales = 'free_y') +
+  labs(y = 'null') +
+  scale_fill_viridis_c() 
+```
+
+### Split data
+
+```{r}
+# split data
+set.seed(123)
+wind_split <- initial_split(turbine_df)
+wind_split
+wind_train <- training(wind_split)
+wind_test <- testing(wind_split)
+
+# create folds to pass for resampling
+set.seed(234)
+wind_folds <- vfold_cv(wind_train)
+wind_folds
+```
+
+### Set up model tuning search
+
+```{r}
+# an rpart decision tree regression model
+# we'll search for cost, depth, min 
+tree_spec <- decision_tree(
+  cost_complexity = tune(), 
+  tree_depth = tune(), 
+  min_n = tune()
+  ) %>% 
+  set_engine("rpart") %>% 
+  set_mode("regression")
+
+tree_spec
+
+# set up the grid to search over
+tree_grid <- grid_regular(cost_complexity(), min_n(), tree_depth(),
+                          levels = 4)
+tree_grid
+
+doParallel::registerDoParallel()
+set.seed(345)
+
+# do hyperparameter tuning with: model, formula/recipe, cv, grid
+tree_rs <- tune_grid(
+  object = tree_spec, 
+  turbine_capacity ~ .,
+  resamples = wind_folds,
+  grid = tree_grid,
+  metrics = metric_set(rmse, rsq, mae, mape)
+)
+
+```
+
+### Explore Tuning Results
+
+```{r}
+autoplot(tree_rs) + theme_light()
+```
+
+
+```{r}
+collect_metrics(tree_rs)
+show_best(tree_rs, 'rmse')
+# best model
+select_best(tree_rs, 'rmse')
+
+```
+
+### Final tree, not fit yet
+
+```{r}
+# finalize best model and train on all training data
+final_tree <- finalize_model(tree_spec, select_best(tree_rs, 'rmse'))
+final_fit <- fit(final_tree, turbine_capacity ~ ., wind_train)
+
+# final_fit # contains the rpart tree model, can see partitions
+```
+
+### Predicting test data
+
+```{r}
+# alternately, use last_fit
+final_rs <- last_fit(final_tree, turbine_capacity~., wind_split)
+final_rs
+```
+
+
+```{r}
+# eg.
+# predict(final_fit, wind_train)
+```
+
+### Variable importance
+
+```{r}
+library(vip)
+final_fit %>% 
+  vip(geom ='col', aesthetics = list(fill = 'midnightblue', alpha = 0.8)) +
+  scale_y_continuous(expand = c(0,0))
+```
+
+## Visualize partioning
+
+```{r}
+# can only have two predictors for this visualization
+example_fit <- fit(final_tree, 
+                   turbine_capacity ~ rotor_diameter_m + commissioning_date,
+                   wind_train)
+
+# remotes::install_github("grantmcdermott/parttree")
+library(parttree)
+
+wind_train %>% 
+  ggplot(aes(rotor_diameter_m, commissioning_date, color = turbine_capacity)) +
+  geom_parttree(data = example_fit, 
+                aes(fill=turbine_capacity),
+                alpha = 0.4, color = 'white', size = 0.5) +
+  geom_jitter(width = 0.8, alpha = 0.5, height = 0.5) +
+  scale_colour_viridis_c(aesthetics = c('color','fill'))
+```
+
+
+### Visualize prediction accuracy
+
+```{r}
+collect_predictions(final_rs) %>% 
+  ggplot(aes(turbine_capacity, .pred)) +
+  geom_point(alpha = 0.6, size = 0.7) + 
+  geom_abline(slope = 1, lty = 2, alpha = 0.8, color = 'gray') +
+  coord_equal()
+  
+```
+
+```{r}
+
+```
+
