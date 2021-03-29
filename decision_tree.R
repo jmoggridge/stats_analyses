@@ -15,7 +15,7 @@ library(vip)
 library(glue)
 library(rcartocolor)
 
-diabetes <- read_csv("./Assignments_and_midterm/6970_midterm/diabetes.csv")
+diabetes <- read_csv("https://gist.github.com/ktisha/c21e73a1bd1700294ef790c56c8aec1f")
 
 ### tidying up data and creating predictors -----
 
