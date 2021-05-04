@@ -1,0 +1,113 @@
+---
+title: "Crop yields: comparing many linear models"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::downcute:
+    self_contained: true
+    toc_depth: 2
+---
+
+
+```{r setup, include=FALSE}
+library(knitr)
+library(rmdformats)
+
+## Global options
+opts_chunk$set(echo=TRUE,
+	             cache=FALSE,
+               message=FALSE,
+               warning=FALSE)
+options(max.print="75")
+opts_knit$set(width=75)
+
+library(tidyverse)
+library(tidymodels)
+```
+
+## Dataset
+
+Crop yields dataset for many different countries and crops from 1950s onwards.
+```{r}
+crops <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-09-01/key_crop_yields.csv")
+land_use <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2020/2020-09-01/land_use_vs_yield_change_in_cereal_production.csv")
+```
+
+## Filtering
+
+Pick top countries by population.
+
+```{r}
+top_countries <- land_use %>% 
+  janitor::clean_names() %>% 
+  filter(!is.na(code), 
+         entity != 'World') %>% 
+  group_by(entity) %>% 
+  filter(year == max(year)) %>% 
+  ungroup() %>% 
+  slice_max(total_population_gapminder, n = 30) %>% 
+  pull(entity)
+  
+```
+
+Filter crop yields for most common types and only from top countries.
+
+```{r}
+yields <- crops %>%
+  janitor::clean_names() %>% 
+  pivot_longer(wheat_tonnes_per_hectare:bananas_tonnes_per_hectare, 
+               names_to = 'crop', values_to = 'yield') %>% 
+  mutate(crop = str_remove(crop, '_.+')) %>% 
+  filter(crop %in% c('wheat', 'rice', 'maize', 'barley'),
+         entity %in% top_countries,
+         !is.na(yield))
+```
+
+
+```{r}
+ggplot(yields, aes(year, yield, color = crop)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~entity) +
+  labs(x ='', y = 'tonnes per hectare')
+```
+
+## Many models for crop yields
+
+```{r}
+tidy_lm <- yields %>% 
+  nest(crop_yields = c(year, yield)) %>% 
+  mutate(model = map(crop_yields, ~lm(yield ~ year, data=.x)))
+
+slopes <- tidy_lm %>% 
+  mutate(coefs = map(model, tidy)) %>% 
+  unnest(coefs) %>% 
+  filter(term == 'year') %>% 
+  mutate(p.value = p.adjust(p.value))
+```
+
+
+
+```{r}
+
+slopes %>% 
+  ggplot(aes(estimate, p.value, label = entity)) +
+  geom_vline(xintercept = 0, lty = 2, alpha = 0.5) +
+  geom_point(aes(color = crop), alpha = 0.7, show.legend = F) +
+  ggrepel::geom_text_repel(size = 2.3, max.overlaps = 35) +
+  scale_y_log10() +
+  facet_wrap(~crop) +
+  labs(subtitle = "Annual increase in crop yield")
+```
+
+Use glance to pull out goodness-of-fit data
+
+```{r}
+tidy_lm %>% 
+  mutate(glance = map(model, glance)) %>% 
+  unnest(glance) %>% 
+  ggplot(aes(adj.r.squared, fct_rev(entity))) +
+  geom_point() +
+  facet_grid(.~crop) +
+  labs(y='')
+```
+

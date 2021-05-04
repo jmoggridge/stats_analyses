@@ -1,13 +1,14 @@
 ---
-title: "Untitled"
+title: "Text classifier for netflix descriptions using linear SVM"
 author: "J Moggridge"
 date: "25/04/2021"
 output: 
   github_document:
     toc: true
-    toc_depth: 2
-  
+    toc_depth: 4
 ---
+
+Adapted from the Julia Silge youtube video: https://www.youtube.com/watch?v=XYj8vyK864Y 
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
@@ -16,13 +17,18 @@ knitr::opts_chunk$set(echo = TRUE)
 ## Netflix description classifier
 
 ```{r message=FALSE, warning=FALSE}
+# devtools::install_github("tidymodels/parsnip")
 library(tidyverse)
 library(tidymodels)
 library(lubridate)
 library(tidytext)
+library(textrecipes)
+library(themis)
+
 theme_set(theme_minimal())
 ```
 
+### Tidy tuesday Netflix titles dataset
 
 ```{r message = FALSE}
 netflix_titles <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2021/2021-04-20/netflix_titles.csv")
@@ -37,8 +43,11 @@ netflix_titles %>%
   pull(description)
 ```
 
+# Common words in descriptions of tv shows and movies
 
 ```{r}
+# get words in description as column (w multiple rows per description)
+# count occurences of words by type (tv show or movie)
 netflix_titles %>% 
   unnest_tokens(word, description) %>% 
   anti_join(get_stopwords()) %>% 
@@ -55,9 +64,12 @@ netflix_titles %>%
        subtitle = 'Netflix descriptions word count by type')
 ```
 
+### Split data
 
 ```{r}
 # train a machine learning model that learns to classify movies and tv shows based on the words in the description
+
+set.seed(1234)
 
 netflix_split <- netflix_titles %>% 
   select(type, description) %>% 
@@ -65,5 +77,109 @@ netflix_split <- netflix_titles %>%
 
 netflix_train <- training(netflix_split)
 netflix_test <- testing (netflix_split)
+
+netflix_folds <- vfold_cv(netflix_train, strata = type)
+
+```
+
+
+### Data preprocessing for text
+
+```{r}
+
+netflix_rec <- 
+  recipe(type ~ description, data = netflix_train) %>% 
+  # words as features
+  step_tokenize(description) %>% 
+  step_stopwords(description) %>% 
+  step_tokenfilter(description, max_times = 1e3) %>% 
+  step_tfidf(description) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  # generate new examples of minority class using NN
+  step_smote(type)
+
+netflix_rec
+```
+
+### SVM model and workflow
+
+```{r}
+svm_spec <- svm_linear() %>% 
+  set_mode('classification') %>% 
+  set_engine('LiblineaR')
+
+netflix_wf <- workflow() %>% 
+  add_recipe(netflix_rec) %>% 
+  add_model(svm_spec)
+```
+
+### Cross-validation
+
+```{r}
+doParallel::registerDoParallel()
+
+set.seed(123)
+
+svm_rs <- fit_resamples(
+  netflix_wf,
+  netflix_folds,
+  metrics = metric_set(accuracy, recall, precision),
+  control = control_resamples(save_pred = TRUE)
+)
+collect_metrics(svm_rs)
+```
+
+### CV results
+
+```{r}
+# get confusion matrix from resamples
+svm_rs %>% 
+  conf_mat_resampled() %>% 
+  autoplot()
+```
+
+### Fit and evaluate final model
+
+```{r}
+# refit and predict test
+final_fitted <- last_fit(
+    netflix_wf, 
+    split = netflix_split,
+    metrics = metric_set(accuracy, recall, precision)
+  )
+
+collect_metrics(final_fitted)
+```
+
+```{r}
+collect_predictions(final_fitted) %>% 
+  conf_mat(type, .pred_class) %>% 
+  autoplot()
+```
+
+```{r}
+# workflow has feature engineering and model algorithm
+netflix_fit <- pull_workflow_fit(final_fitted$.workflow[[1]])
+```
+
+
+```{r}
+tidy(netflix_fit) %>% arrange(estimate)
+```
+
+```{r}
+tidy(netflix_fit) %>% 
+  filter(term != 'bias') %>% 
+  group_by(estimate > 0) %>% 
+  slice_max(abs(estimate), n= 15) %>% 
+  mutate(term = str_remove(term, 'tfidf_description_'),
+         sign = if_else(estimate > 0, 'more tv', 'more movies')) %>% 
+  ggplot(aes(abs(estimate), 
+             fct_reorder(term, abs(estimate)),
+             fill = sign)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sign, scales = 'free') +
+  labs(x = 'SVM coefficient', y = '')
+  
 ```
 

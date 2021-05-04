@@ -4,14 +4,19 @@ J Moggridge
 25/04/2021
 
 -   [Netflix description classifier](#netflix-description-classifier)
+-   [Fit and evaluate final model](#fit-and-evaluate-final-model)
 
 ## Netflix description classifier
 
 ``` r
+# devtools::install_github("tidymodels/parsnip")
 library(tidyverse)
 library(tidymodels)
 library(lubridate)
 library(tidytext)
+library(textrecipes)
+library(themis)
+
 theme_set(theme_minimal())
 ```
 
@@ -79,4 +84,157 @@ netflix_titles %>%
 
 ``` r
 # train a machine learning model that learns to classify movies and tv shows based on the words in the description
+
+set.seed(1234)
+
+netflix_split <- netflix_titles %>% 
+  select(type, description) %>% 
+  initial_split(strata = type)
+
+netflix_train <- training(netflix_split)
+netflix_test <- testing (netflix_split)
+
+netflix_folds <- vfold_cv(netflix_train, strata = type)
 ```
+
+``` r
+netflix_rec <- 
+  recipe(type ~ description, data = netflix_train) %>% 
+  # words as features
+  step_tokenize(description) %>% 
+  step_stopwords(description) %>% 
+  step_tokenfilter(description, max_times = 1e3) %>% 
+  step_tfidf(description) %>% 
+  step_normalize(all_numeric_predictors()) %>% 
+  # generate new examples of minority class using NN
+  step_smote(type)
+
+netflix_rec
+```
+
+    ## Data Recipe
+    ## 
+    ## Inputs:
+    ## 
+    ##       role #variables
+    ##    outcome          1
+    ##  predictor          1
+    ## 
+    ## Operations:
+    ## 
+    ## Tokenization for description
+    ## Stop word removal for description
+    ## Text filtering for description
+    ## Term frequency-inverse document frequency with description
+    ## Centering and scaling for all_numeric_predictors()
+    ## SMOTE based on type
+
+``` r
+svm_spec <- svm_linear() %>% 
+  set_mode('classification') %>% 
+  set_engine('LiblineaR')
+
+netflix_wf <- workflow() %>% 
+  add_recipe(netflix_rec) %>% 
+  add_model(svm_spec)
+```
+
+``` r
+doParallel::registerDoParallel()
+
+set.seed(123)
+
+svm_rs <- fit_resamples(
+  netflix_wf,
+  netflix_folds,
+  metrics = metric_set(accuracy, recall, precision),
+  control = control_resamples(save_pred = TRUE)
+)
+collect_metrics(svm_rs)
+```
+
+    ## # A tibble: 3 x 6
+    ##   .metric   .estimator  mean     n std_err .config             
+    ##   <chr>     <chr>      <dbl> <int>   <dbl> <chr>               
+    ## 1 accuracy  binary     0.615    10 0.00482 Preprocessor1_Model1
+    ## 2 precision binary     0.782    10 0.00407 Preprocessor1_Model1
+    ## 3 recall    binary     0.614    10 0.00685 Preprocessor1_Model1
+
+``` r
+# get confusion matrix from resamples
+svm_rs %>% 
+  conf_mat_resampled(tidy = FALSE)
+```
+
+    ##         Movie TV Show
+    ## Movie   247.5   155.8
+    ## TV Show  69.1   111.7
+
+## Fit and evaluate final model
+
+``` r
+# refit and predict test
+final_fitted <- last_fit(
+    netflix_wf, 
+    split = netflix_split,
+    metrics = metric_set(accuracy, recall, precision)
+  )
+
+collect_metrics(final_fitted)
+```
+
+    ## # A tibble: 3 x 4
+    ##   .metric   .estimator .estimate .config             
+    ##   <chr>     <chr>          <dbl> <chr>               
+    ## 1 accuracy  binary         0.624 Preprocessor1_Model1
+    ## 2 recall    binary         0.624 Preprocessor1_Model1
+    ## 3 precision binary         0.787 Preprocessor1_Model1
+
+``` r
+collect_predictions(final_fitted) %>% 
+  conf_mat(type, .pred_class) %>% 
+  autoplot()
+```
+
+![](netflix_descriptions_classifier_w_tidytext_files/figure-gfm/unnamed-chunk-10-1.png)<!-- -->
+
+``` r
+# workflow has feature engineering and model algorithm
+netflix_fit <- pull_workflow_fit(final_fitted$.workflow[[1]])
+```
+
+``` r
+tidy(netflix_fit) %>% arrange(estimate)
+```
+
+    ## # A tibble: 101 x 2
+    ##    term                          estimate
+    ##    <chr>                            <dbl>
+    ##  1 tfidf_description_documentary  -0.126 
+    ##  2 tfidf_description_film         -0.0844
+    ##  3 tfidf_description_man          -0.0778
+    ##  4 tfidf_description_father       -0.0763
+    ##  5 tfidf_description_stand        -0.0715
+    ##  6 tfidf_description_falls        -0.0686
+    ##  7 tfidf_description_woman        -0.0617
+    ##  8 tfidf_description_begins       -0.0572
+    ##  9 tfidf_description_save         -0.0563
+    ## 10 tfidf_description_gets         -0.0557
+    ## # … with 91 more rows
+
+``` r
+tidy(netflix_fit) %>% 
+  filter(term != 'bias') %>% 
+  group_by(estimate > 0) %>% 
+  slice_max(abs(estimate), n= 15) %>% 
+  mutate(term = str_remove(term, 'tfidf_description_'),
+         sign = if_else(estimate > 0, 'more tv', 'more movies')) %>% 
+  ggplot(aes(abs(estimate), 
+             fct_reorder(term, abs(estimate)),
+             fill = sign)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sign, scales = 'free') +
+  labs(x = 'SVM coefficient', y = '')
+```
+
+![](netflix_descriptions_classifier_w_tidytext_files/figure-gfm/unnamed-chunk-13-1.png)<!-- -->
