@@ -1,0 +1,96 @@
+---
+title: ""
+date: "`r Sys.Date()`"
+output:
+  rmdformats::downcute:
+    self_contained: true
+---
+
+Bootstrap confidence intervals
+
+```{r setup, include=FALSE}
+library(knitr)
+library(rmdformats)
+
+## Global options
+options(max.print="75")
+opts_chunk$set(cache=FALSE,
+               prompt=FALSE,
+               comment=NA,
+               message=FALSE,
+               warning=FALSE)
+opts_knit$set(width=75)
+```
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+```
+
+```{r}
+youtube <- read_csv("https://raw.githubusercontent.com/rfordatascience/tidytuesday/master/data/2021/2021-03-02/youtube.csv")
+```
+
+```{r}
+youtube %>% 
+  select(year, funny:use_sex) %>% 
+  pivot_longer(funny:use_sex) %>% 
+  group_by(year, name) %>% 
+  summarise(prop = mean(value)) %>% 
+  ungroup() %>% 
+  ggplot(aes(year, prop, color=name)) +
+  geom_line(show.legend = F, size = 1.2) +
+  facet_wrap(~name) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x= '' , y ='percent of commercials', 
+       subtitle = 'Superbowl commercials')
+  
+```
+
+## Linear model
+
+```{r}
+simple_mod <- lm(year ~ funny + show_product_quickly + patriotic + celebrity + animals + use_sex, data = youtube)
+summary(simple_mod)
+```
+
+```{r}
+library(rsample)
+bootstraps(youtube, times = 1e3)
+```
+
+
+```{r}
+set.seed(123)
+youtube_intervals <- 
+  reg_intervals(
+    year ~ funny + show_product_quickly + patriotic + 
+      celebrity + animals + use_sex + danger, 
+    data = youtube,
+    type = "percentile",
+    keep_reps = TRUE)
+```
+
+```{r}
+youtube_intervals %>% 
+  mutate(term = str_remove(term, 'TRUE'),
+         term = reorder(term, .estimate)) %>% 
+  ggplot(aes(.estimate, term)) +
+  geom_vline(xintercept = 0, size = 2, lty = 2, alpha = 0.4) +
+  geom_pointrange(aes(xmin = .lower, xmax = .upper)) +
+  labs(y = '', 
+       title = 'Superbowl commercials',
+       subtitle = 'Bootstrap confidence intervals for coefficients\n in linear model for year ~ X')
+```
+
+```{r}
+youtube_intervals %>% 
+  mutate(term = str_remove(term, 'TRUE'),
+         term = reorder(term, .estimate)) %>% 
+  unnest(.replicates) %>% 
+  ggplot(aes(estimate, fill = term)) +
+  geom_vline(xintercept = 0, lty =  2, alpha = 0.5) +
+  geom_histogram(show.legend = F, alpha = 0.75) +
+  facet_wrap(~term)
+```
+
